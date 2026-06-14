@@ -30,6 +30,9 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
   final FlutterTts _tts = FlutterTts();
   bool _isSpeaking = false;
   bool _isPaused = false;
+  List<String> _ttsQueue = const [];
+  int _ttsQueueIndex = 0;
+  bool _ttsReadingSelection = false;
 
   bool _showBars = true;
   bool _waitingForExtraSwipeAtEnd = false;
@@ -39,6 +42,7 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
 
   static const double _chapterEndThreshold = 12;
   static const double _extraSwipeThreshold = 24;
+  static const int _ttsChunkMaxLength = 3200;
 
   @override
   void initState() {
@@ -50,7 +54,8 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
   }
 
   Future<void> _initTts() async {
-    await _tts.setLanguage('vi-VN');
+    await _configureTtsLanguage();
+    await _tts.awaitSpeakCompletion(false);
     await _applyTtsSettings();
     _tts.setCompletionHandler(_handleTtsCompleted);
     _tts.setErrorHandler((msg) {
@@ -63,6 +68,25 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
     });
   }
 
+  Future<void> _configureTtsLanguage() async {
+    try {
+      final rawLanguages = await _tts.getLanguages;
+      final languages = rawLanguages is Iterable
+          ? rawLanguages.map((item) => item.toString()).toList()
+          : const <String>[];
+      final selected = languages.firstWhere(
+        (language) => language.toLowerCase() == 'vi-vn',
+        orElse: () => languages.firstWhere(
+          (language) => language.toLowerCase().startsWith('vi'),
+          orElse: () => languages.contains('en-US') ? 'en-US' : '',
+        ),
+      );
+      await _tts.setLanguage(selected.isEmpty ? 'vi-VN' : selected);
+    } catch (_) {
+      await _tts.setLanguage('vi-VN');
+    }
+  }
+
   Future<void> _applyTtsSettings() async {
     final settings = context.read<ReadingSettingsProvider>();
     await _tts.setSpeechRate(settings.ttsRate);
@@ -72,8 +96,16 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
 
   Future<void> _handleTtsCompleted() async {
     if (!mounted) return;
+    if (_ttsQueueIndex < _ttsQueue.length - 1) {
+      _ttsQueueIndex++;
+      await _tts.speak(_ttsQueue[_ttsQueueIndex]);
+      return;
+    }
+
     final settings = context.read<ReadingSettingsProvider>();
-    if (settings.audioAutoNext && _currentIndex < _chapters.length - 1) {
+    if (!_ttsReadingSelection &&
+        settings.audioAutoNext &&
+        _currentIndex < _chapters.length - 1) {
       await _goToChapter(_currentIndex + 1, smooth: false);
       await _speakCurrentChapter();
       return;
@@ -82,8 +114,52 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
       setState(() {
         _isSpeaking = false;
         _isPaused = false;
+        _ttsQueue = const [];
+        _ttsQueueIndex = 0;
+        _ttsReadingSelection = false;
       });
     }
+  }
+
+  List<String> _splitTtsText(String value) {
+    final text = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) return const [];
+    final chunks = <String>[];
+    var start = 0;
+    while (start < text.length) {
+      var end = (start + _ttsChunkMaxLength).clamp(0, text.length).toInt();
+      if (end < text.length) {
+        final boundary = text.lastIndexOf(RegExp(r'[.!?。！？]\s'), end);
+        if (boundary > start + 400) {
+          end = boundary + 1;
+        } else {
+          final space = text.lastIndexOf(' ', end);
+          if (space > start + 400) end = space;
+        }
+      }
+      chunks.add(text.substring(start, end).trim());
+      start = end;
+      while (start < text.length && text[start] == ' ') {
+        start++;
+      }
+    }
+    return chunks.where((chunk) => chunk.isNotEmpty).toList();
+  }
+
+  Future<void> _speakText(String text, {required bool selection}) async {
+    final chunks = _splitTtsText(text);
+    if (chunks.isEmpty) return;
+    await _applyTtsSettings();
+    await _tts.stop();
+    _ttsQueue = chunks;
+    _ttsQueueIndex = 0;
+    _ttsReadingSelection = selection;
+    await _tts.speak(chunks.first);
+    if (!mounted) return;
+    setState(() {
+      _isSpeaking = true;
+      _isPaused = false;
+    });
   }
 
   Future<void> _loadEpub() async {
@@ -114,6 +190,7 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
       await _recordCurrentHistory();
       await _refreshBookmarkState();
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.toString();
         _isLoading = false;
@@ -236,6 +313,7 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
     _waitingForExtraSwipeAtEnd = false;
     _endOverscrollDistance = 0;
     await _stopTts();
+    if (!mounted) return;
     setState(() => _currentIndex = index);
     ApiService.saveChapterProgress(
       widget.story.id,
@@ -245,12 +323,13 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
     await _recordCurrentHistory();
     await _refreshBookmarkState();
     if (smooth) {
+      if (!_scrollController.hasClients) return;
       await _scrollController.animateTo(
         0,
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeOut,
       );
-    } else {
+    } else if (_scrollController.hasClients) {
       _scrollController.jumpTo(0);
     }
   }
@@ -309,14 +388,7 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
   }
 
   Future<void> _speakSelection(String selectedText) async {
-    await _applyTtsSettings();
-    await _tts.stop();
-    await _tts.speak(selectedText);
-    if (!mounted) return;
-    setState(() {
-      _isSpeaking = true;
-      _isPaused = false;
-    });
+    await _speakText(selectedText, selection: true);
   }
 
   void _showSelectionSearch(String selectedText) {
@@ -387,29 +459,34 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
     if (_chapters.isEmpty) return;
     if (_isSpeaking && !_isPaused) {
       await _tts.pause();
+      if (!mounted) return;
       setState(() => _isPaused = true);
     } else if (_isPaused) {
-      await _speakCurrentChapter();
+      final index = _ttsQueueIndex.clamp(0, _ttsQueue.length - 1).toInt();
+      final chunk = _ttsQueue.isNotEmpty
+          ? _ttsQueue[index]
+          : _chapters[_currentIndex].plain;
+      await _tts.speak(chunk);
+      if (!mounted) return;
+      setState(() => _isPaused = false);
     } else {
       await _speakCurrentChapter();
     }
   }
 
   Future<void> _speakCurrentChapter() async {
-    await _applyTtsSettings();
-    await _tts.speak(_chapters[_currentIndex].plain);
-    if (!mounted) return;
-    setState(() {
-      _isSpeaking = true;
-      _isPaused = false;
-    });
+    await _speakText(_chapters[_currentIndex].plain, selection: false);
   }
 
   Future<void> _stopTts() async {
     await _tts.stop();
+    if (!mounted) return;
     setState(() {
       _isSpeaking = false;
       _isPaused = false;
+      _ttsQueue = const [];
+      _ttsQueueIndex = 0;
+      _ttsReadingSelection = false;
     });
   }
 
@@ -486,10 +563,6 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
           final dx = details.globalPosition.dx;
           if (dx < width * 0.25) {
             _scaffoldKey.currentState?.openDrawer();
-          } else if (dx > width * 0.75) {
-            if (_currentIndex < _chapters.length - 1) {
-              _goToChapter(_currentIndex + 1);
-            }
           } else {
             setState(() => _showBars = !_showBars);
           }

@@ -22,6 +22,7 @@ class StoryDetailScreen extends StatefulWidget {
 
 class _StoryDetailScreenState extends State<StoryDetailScreen> {
   bool _isDownloading = false;
+  bool _isOpeningOnline = false;
   bool _descExpanded = false;
   double? _downloadProgress;
   int _downloadedBytes = 0;
@@ -144,12 +145,11 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
       );
       await ApiService.importLocalStory(updatedStory);
       final savedStory = await ApiService.updateLocalStory(updatedStory);
+      if (!mounted) return;
       setState(() => _story = savedStory ?? updatedStory);
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Lưu về máy thành công!')));
-      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Lưu về máy thành công!')));
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -168,6 +168,46 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
     }
   }
 
+  Future<void> _openDriveTxtOnline() async {
+    if (!_story.isFromDrive || _story.driveFileId.isEmpty) return;
+
+    setState(() => _isOpeningOnline = true);
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final cacheDirectory = Directory('${directory.path}/drive_read_cache');
+      await cacheDirectory.create(recursive: true);
+      final safeId = _story.driveFileId.replaceAll(
+        RegExp(r'[^A-Za-z0-9_-]'),
+        '_',
+      );
+      var cachedFile = File('${cacheDirectory.path}/$safeId.txt');
+      if (!await cachedFile.exists() || await cachedFile.length() == 0) {
+        cachedFile = await GoogleDriveService.downloadFileToFile(
+          _story.driveFileId,
+          cachedFile,
+        );
+      }
+      final content = await cachedFile.readAsString();
+      if (!mounted) return;
+      final cachedStory = _story.copyWith(
+        localPath: cachedFile.path,
+        content: content,
+        fileType: 'txt',
+      );
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => ReadingScreen(story: cachedStory)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Không thể mở TXT từ Drive: $e')));
+    } finally {
+      if (mounted) setState(() => _isOpeningOnline = false);
+    }
+  }
+
   String get _downloadButtonLabel {
     if (!_isDownloading) return 'Lưu về máy';
     final progress = _downloadProgress;
@@ -175,6 +215,9 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
     final percent = (progress.clamp(0.0, 1.0) * 100).round();
     return 'Đang tải $percent%';
   }
+
+  String get _readOnlineButtonLabel =>
+      _isOpeningOnline ? 'Đang mở...' : 'Đọc online';
 
   Future<String> _detectFileType(File file) async {
     final stream = file.openRead(0, 4);
@@ -215,9 +258,11 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
   bool get _canReadOnline =>
       _story.isFromDrive &&
       _story.localPath.isEmpty &&
-      (_storyFileType == 'epub' || _storyFileType == 'pdf');
+      (_storyFileType == 'epub' ||
+          _storyFileType == 'pdf' ||
+          _storyFileType == 'txt');
 
-  void _startReading() {
+  Future<void> _startReading() async {
     ApiService.recordReadingHistory(
       _story,
       chapterIndex: _story.savedChapterIndex,
@@ -243,6 +288,10 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
           );
           return;
         }
+        if (_storyFileType == 'txt') {
+          await _openDriveTxtOnline();
+          return;
+        }
       }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -253,12 +302,13 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
       );
       return;
     }
-    if (localPath.endsWith('.pdf')) {
+    final fileType = _storyFileType;
+    if (fileType == 'pdf') {
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => PdfReaderScreen(story: _story)),
       );
-    } else if (localPath.endsWith('.epub')) {
+    } else if (fileType == 'epub') {
       Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => ChapterReaderScreen(story: _story)),
@@ -310,7 +360,7 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
       body: CustomScrollView(
         slivers: [
           SliverAppBar(
-            expandedHeight: size.height * 0.38,
+            expandedHeight: (size.height * 0.38).clamp(260.0, 360.0).toDouble(),
             pinned: true,
             stretch: true,
             backgroundColor: colorScheme.surface,
@@ -408,12 +458,22 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
                         if (_canReadOnline) ...[
                           Expanded(
                             child: FilledButton.icon(
-                              onPressed: _isDownloading ? null : _startReading,
-                              icon: const Icon(
-                                Icons.play_arrow_rounded,
-                                size: 20,
-                              ),
-                              label: const Text('Đọc online'),
+                              onPressed: _isDownloading || _isOpeningOnline
+                                  ? null
+                                  : _startReading,
+                              icon: _isOpeningOnline
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.play_arrow_rounded,
+                                      size: 20,
+                                    ),
+                              label: Text(_readOnlineButtonLabel),
                               style: FilledButton.styleFrom(
                                 padding: const EdgeInsets.symmetric(
                                   vertical: 14,
@@ -432,7 +492,9 @@ class _StoryDetailScreenState extends State<StoryDetailScreen> {
                         ],
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: _isDownloading ? null : _downloadStory,
+                            onPressed: _isDownloading || _isOpeningOnline
+                                ? null
+                                : _downloadStory,
                             icon: _isDownloading
                                 ? const SizedBox(
                                     width: 18,

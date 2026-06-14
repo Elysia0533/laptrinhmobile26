@@ -63,15 +63,35 @@ service cloud.firestore {
           'displayName',
           'avatarUrl',
           'text',
-          'createdAt'
+          'createdAt',
+          'attachmentType',
+          'attachmentPath'
         ])
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.displayName is string
         && request.resource.data.displayName.size() > 0
         && request.resource.data.avatarUrl is string
         && request.resource.data.text is string
-        && request.resource.data.text.size() > 0
         && request.resource.data.text.size() <= 1000
+        && (
+          request.resource.data.text.size() > 0 ||
+          (
+            'attachmentPath' in request.resource.data &&
+            request.resource.data.attachmentPath is string &&
+            request.resource.data.attachmentPath.size() > 0
+          )
+        )
+        && (
+          !('attachmentType' in request.resource.data) ||
+          request.resource.data.attachmentType in ['image', 'video']
+        )
+        && (
+          !('attachmentPath' in request.resource.data) ||
+          (
+            request.resource.data.attachmentPath is string &&
+            request.resource.data.attachmentPath.size() <= 2000
+          )
+        )
         && request.resource.data.createdAt is timestamp;
       allow update, delete: if isAdmin();
     }

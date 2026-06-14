@@ -52,8 +52,13 @@ class GoogleDriveService {
     return null;
   }
 
-  static Future<List<Story>> fetchStoriesFromConfiguredFolder() async {
-    final folderUrls = _configuredFolderUrls();
+  static Future<List<Story>> fetchStoriesFromConfiguredFolder({
+    Iterable<String> extraFolderUrls = const [],
+  }) async {
+    final folderUrls = {
+      ..._configuredFolderUrls(),
+      ...extraFolderUrls,
+    }.toList();
     if (folderUrls.isEmpty) {
       throw Exception(
         'Thiếu GOOGLE_DRIVE_FOLDER_URL hoặc GOOGLE_DRIVE_FOLDER_URLS. Hãy truyền link thư mục Drive bằng --dart-define.',

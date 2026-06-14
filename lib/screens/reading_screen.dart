@@ -30,6 +30,10 @@ class _ReadingScreenState extends State<ReadingScreen> {
   final FlutterTts _tts = FlutterTts();
   bool _isSpeaking = false;
   bool _isPaused = false;
+  List<String> _ttsQueue = const [];
+  int _ttsQueueIndex = 0;
+
+  static const int _ttsChunkMaxLength = 3200;
 
   @override
   void initState() {
@@ -42,13 +46,22 @@ class _ReadingScreenState extends State<ReadingScreen> {
   }
 
   Future<void> _initTts() async {
-    await _tts.setLanguage('vi-VN');
+    await _configureTtsLanguage();
+    await _tts.awaitSpeakCompletion(false);
     await _applyTtsSettings();
-    _tts.setCompletionHandler(() {
+    _tts.setCompletionHandler(() async {
+      if (!mounted) return;
+      if (_ttsQueueIndex < _ttsQueue.length - 1) {
+        _ttsQueueIndex++;
+        await _tts.speak(_ttsQueue[_ttsQueueIndex]);
+        return;
+      }
       if (mounted) {
         setState(() {
           _isSpeaking = false;
           _isPaused = false;
+          _ttsQueue = const [];
+          _ttsQueueIndex = 0;
         });
       }
     });
@@ -62,6 +75,25 @@ class _ReadingScreenState extends State<ReadingScreen> {
     });
   }
 
+  Future<void> _configureTtsLanguage() async {
+    try {
+      final rawLanguages = await _tts.getLanguages;
+      final languages = rawLanguages is Iterable
+          ? rawLanguages.map((item) => item.toString()).toList()
+          : const <String>[];
+      final selected = languages.firstWhere(
+        (language) => language.toLowerCase() == 'vi-vn',
+        orElse: () => languages.firstWhere(
+          (language) => language.toLowerCase().startsWith('vi'),
+          orElse: () => languages.contains('en-US') ? 'en-US' : '',
+        ),
+      );
+      await _tts.setLanguage(selected.isEmpty ? 'vi-VN' : selected);
+    } catch (_) {
+      await _tts.setLanguage('vi-VN');
+    }
+  }
+
   Future<void> _applyTtsSettings() async {
     final settings = context.read<ReadingSettingsProvider>();
     await _tts.setSpeechRate(settings.ttsRate);
@@ -71,11 +103,13 @@ class _ReadingScreenState extends State<ReadingScreen> {
 
   Future<void> _restoreScrollPosition() async {
     final offset = await ApiService.getScrollOffset(widget.story.id);
+    if (!mounted) return;
     if (offset > 0 && _scrollController.hasClients) {
       _scrollController.jumpTo(offset);
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         final savedOffset = await ApiService.getScrollOffset(widget.story.id);
+        if (!mounted) return;
         if (savedOffset > 0 && _scrollController.hasClients) {
           _scrollController.jumpTo(
             savedOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
@@ -100,28 +134,71 @@ class _ReadingScreenState extends State<ReadingScreen> {
       ? widget.story.contentEng
       : widget.story.content;
 
+  List<String> _splitTtsText(String value) {
+    final text = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) return const [];
+    final chunks = <String>[];
+    var start = 0;
+    while (start < text.length) {
+      var end = (start + _ttsChunkMaxLength).clamp(0, text.length).toInt();
+      if (end < text.length) {
+        final boundary = text.lastIndexOf(RegExp(r'[.!?。！？]\s'), end);
+        if (boundary > start + 400) {
+          end = boundary + 1;
+        } else {
+          final space = text.lastIndexOf(' ', end);
+          if (space > start + 400) end = space;
+        }
+      }
+      chunks.add(text.substring(start, end).trim());
+      start = end;
+      while (start < text.length && text[start] == ' ') {
+        start++;
+      }
+    }
+    return chunks.where((chunk) => chunk.isNotEmpty).toList();
+  }
+
+  Future<void> _speakText(String text) async {
+    final chunks = _splitTtsText(text);
+    if (chunks.isEmpty) return;
+    await _applyTtsSettings();
+    await _tts.stop();
+    _ttsQueue = chunks;
+    _ttsQueueIndex = 0;
+    await _tts.speak(chunks.first);
+    if (!mounted) return;
+    setState(() {
+      _isSpeaking = true;
+      _isPaused = false;
+    });
+  }
+
   Future<void> _toggleTts() async {
     await _applyTtsSettings();
     if (_isSpeaking && !_isPaused) {
       await _tts.pause();
+      if (!mounted) return;
       setState(() => _isPaused = true);
     } else if (_isPaused) {
-      await _tts.speak(_currentContent);
+      final index = _ttsQueueIndex.clamp(0, _ttsQueue.length - 1).toInt();
+      final chunk = _ttsQueue.isNotEmpty ? _ttsQueue[index] : _currentContent;
+      await _tts.speak(chunk);
+      if (!mounted) return;
       setState(() => _isPaused = false);
     } else {
-      await _tts.speak(_currentContent);
-      setState(() {
-        _isSpeaking = true;
-        _isPaused = false;
-      });
+      await _speakText(_currentContent);
     }
   }
 
   Future<void> _stopTts() async {
     await _tts.stop();
+    if (!mounted) return;
     setState(() {
       _isSpeaking = false;
       _isPaused = false;
+      _ttsQueue = const [];
+      _ttsQueueIndex = 0;
     });
   }
 
@@ -182,14 +259,7 @@ class _ReadingScreenState extends State<ReadingScreen> {
   }
 
   Future<void> _speakSelection(String selectedText) async {
-    await _applyTtsSettings();
-    await _tts.stop();
-    await _tts.speak(selectedText);
-    if (!mounted) return;
-    setState(() {
-      _isSpeaking = true;
-      _isPaused = false;
-    });
+    await _speakText(selectedText);
   }
 
   void _showSelectionSearch(String selectedText) {

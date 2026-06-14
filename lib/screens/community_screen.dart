@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
+import 'dart:io';
 import '../models/community_message.dart';
 import '../services/api_service.dart';
 import '../theme/user_provider.dart';
@@ -20,13 +22,27 @@ class _CommunityScreenState extends State<CommunityScreen> {
   bool _isSending = false;
   String? _error;
   String? _loadedToken;
+  String _attachmentPath = '';
+  String _attachmentType = '';
+
+  static const List<String> _quickEmojis = [
+    '😊',
+    '😂',
+    '😍',
+    '👍',
+    '🔥',
+    '😭',
+    '✨',
+    '❤️',
+  ];
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final user = context.watch<UserProvider>();
-    if (user.isLoggedIn && _loadedToken != user.token) {
-      _loadedToken = user.token;
+    final loadToken = user.isLoggedIn ? user.token : 'guest';
+    if (_loadedToken != loadToken) {
+      _loadedToken = loadToken;
       _loadMessages();
     }
   }
@@ -58,16 +74,22 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty || _isSending) return;
+    if ((text.isEmpty && _attachmentPath.isEmpty) || _isSending) return;
 
     setState(() => _isSending = true);
     try {
-      final message = await ApiService.sendCommunityMessage(text);
+      final message = await ApiService.sendCommunityMessage(
+        text,
+        attachmentType: _attachmentType,
+        attachmentPath: _attachmentPath,
+      );
       if (!mounted) return;
       _messageController.clear();
       setState(() {
         _messages = [..._messages, message];
         _error = null;
+        _attachmentPath = '';
+        _attachmentType = '';
       });
       _scrollToBottom();
     } catch (e) {
@@ -78,6 +100,81 @@ class _CommunityScreenState extends State<CommunityScreen> {
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
+  }
+
+  Future<void> _deleteMessage(CommunityMessage message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Xóa tin nhắn'),
+        content: const Text('Tin nhắn này sẽ bị xóa khỏi cộng đồng.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Xóa'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await ApiService.deleteCommunityMessage(message.id);
+      if (!mounted) return;
+      setState(() {
+        _messages = _messages
+            .where((item) => item.id != message.id)
+            .toList(growable: false);
+      });
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Đã xóa tin nhắn.')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_formatError(e))));
+    }
+  }
+
+  Future<void> _pickAttachment(FileType type) async {
+    final result = await FilePicker.pickFiles(type: type);
+    if (result == null || result.files.single.path == null) return;
+    setState(() {
+      _attachmentPath = result.files.single.path!;
+      _attachmentType = type == FileType.video ? 'video' : 'image';
+    });
+  }
+
+  void _insertEmoji(String emoji) {
+    final value = _messageController.value;
+    final start = value.selection.start < 0
+        ? value.text.length
+        : value.selection.start;
+    final end = value.selection.end < 0
+        ? value.text.length
+        : value.selection.end;
+    final updated = value.text.replaceRange(start, end, emoji);
+    _messageController.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
+  }
+
+  ImageProvider? _avatarImageProvider(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return NetworkImage(trimmed);
+    }
+    final file = File(trimmed);
+    if (file.existsSync()) return FileImage(file);
+    return null;
   }
 
   void _scrollToBottom() {
@@ -119,26 +216,51 @@ class _CommunityScreenState extends State<CommunityScreen> {
           style: TextStyle(fontWeight: FontWeight.bold, color: textColor),
         ),
         actions: [
-          if (userProvider.isLoggedIn)
-            IconButton(
-              icon: Icon(Icons.refresh_rounded, color: textColor),
-              onPressed: _loadMessages,
-              tooltip: 'Làm mới',
-            ),
+          IconButton(
+            icon: Icon(Icons.refresh_rounded, color: textColor),
+            onPressed: _loadMessages,
+            tooltip: 'Làm mới',
+          ),
         ],
       ),
-      body: userProvider.isLoggedIn
-          ? _buildChat(context, isDark, textColor, userProvider)
-          : _buildLoginPrompt(),
+      body: _buildChat(context, isDark, textColor, userProvider),
     );
   }
 
-  Widget _buildLoginPrompt() {
-    return const AppEmptyState(
-      icon: Icons.forum_outlined,
-      title: 'Đăng nhập để tham gia',
-      message:
-          'Sau khi đăng nhập ở tab Cá nhân, bạn có thể đọc và gửi tin nhắn cộng đồng.',
+  Widget _buildGuestInputPrompt(bool isDark) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return SafeArea(
+      top: false,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+        decoration: BoxDecoration(
+          color: isDark ? const Color(0xFF1C1C1E) : Colors.grey.shade50,
+          border: Border(
+            top: BorderSide(color: isDark ? Colors.white10 : Colors.black12),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.lock_outline_rounded,
+              color: colorScheme.onSurfaceVariant,
+              size: 20,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Đăng nhập ở tab Cá nhân để gửi tin nhắn.',
+                style: TextStyle(
+                  color: colorScheme.onSurfaceVariant,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -165,14 +287,23 @@ class _CommunityScreenState extends State<CommunityScreen> {
             children: [
               CircleAvatar(
                 radius: 20,
-                backgroundColor: user.avatarColor,
-                child: Text(
-                  user.initials,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                backgroundColor: user.isLoggedIn
+                    ? user.avatarColor
+                    : Theme.of(context).colorScheme.primary,
+                backgroundImage: user.isLoggedIn
+                    ? _avatarImageProvider(user.avatarUrl)
+                    : null,
+                child:
+                    !user.isLoggedIn ||
+                        _avatarImageProvider(user.avatarUrl) == null
+                    ? Text(
+                        user.isLoggedIn ? user.initials : 'K',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      )
+                    : null,
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -180,14 +311,18 @@ class _CommunityScreenState extends State<CommunityScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      user.name,
+                      user.isLoggedIn ? user.name : 'Khách',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: textColor,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                     Text(
-                      'Sẵn sàng trò chuyện',
+                      user.isLoggedIn
+                          ? 'Sẵn sàng trò chuyện'
+                          : 'Bạn có thể đọc cộng đồng',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -216,57 +351,125 @@ class _CommunityScreenState extends State<CommunityScreen> {
                   itemCount: _messages.length,
                   itemBuilder: (context, index) {
                     final message = _messages[index];
+                    final previous = index > 0 ? _messages[index - 1] : null;
                     final isMine = message.userId == user.id;
-                    return _MessageBubble(
-                      message: message,
-                      isMine: isMine,
-                      isDark: isDark,
-                      mineColor: user.avatarColor,
+                    return Column(
+                      children: [
+                        if (_shouldShowTimeline(previous, message))
+                          _TimelineSeparator(
+                            label: _formatTimelineDate(message.createdAt),
+                            isDark: isDark,
+                          ),
+                        _MessageBubble(
+                          message: message,
+                          isMine: isMine,
+                          isDark: isDark,
+                          mineColor: user.avatarColor,
+                          canModerate: user.isAdmin,
+                          onDelete: user.isAdmin
+                              ? () => _deleteMessage(message)
+                              : null,
+                        ),
+                      ],
                     );
                   },
                 ),
         ),
-        SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    minLines: 1,
-                    maxLines: 4,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _sendMessage(),
-                    decoration: InputDecoration(
-                      hintText: 'Nhập tin nhắn...',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
+        if (user.isLoggedIn)
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    height: 36,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _quickEmojis.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 6),
+                      itemBuilder: (context, index) {
+                        final emoji = _quickEmojis[index];
+                        return ActionChip(
+                          label: Text(emoji),
+                          onPressed: () => _insertEmoji(emoji),
+                          visualDensity: VisualDensity.compact,
+                        );
+                      },
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed: _isSending ? null : _sendMessage,
-                  icon: _isSending
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.send_rounded),
-                  tooltip: 'Gửi',
-                ),
-              ],
+                  if (_attachmentPath.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    _AttachmentPreview(
+                      path: _attachmentPath,
+                      type: _attachmentType,
+                      onRemove: () {
+                        setState(() {
+                          _attachmentPath = '';
+                          _attachmentType = '';
+                        });
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: _isSending
+                            ? null
+                            : () => _pickAttachment(FileType.image),
+                        icon: const Icon(Icons.image_outlined),
+                        tooltip: 'Gửi ảnh',
+                      ),
+                      IconButton(
+                        onPressed: _isSending
+                            ? null
+                            : () => _pickAttachment(FileType.video),
+                        icon: const Icon(Icons.video_file_outlined),
+                        tooltip: 'Gửi video',
+                      ),
+                      Expanded(
+                        child: TextField(
+                          controller: _messageController,
+                          minLines: 1,
+                          maxLines: 4,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (_) => _sendMessage(),
+                          decoration: InputDecoration(
+                            hintText: 'Nhập tin nhắn...',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton.filled(
+                        onPressed: _isSending ? null : _sendMessage,
+                        icon: _isSending
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.send_rounded),
+                        tooltip: 'Gửi',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ),
+          )
+        else
+          _buildGuestInputPrompt(isDark),
       ],
     );
   }
@@ -289,6 +492,38 @@ class _CommunityScreenState extends State<CommunityScreen> {
           'Hãy bắt đầu cuộc trò chuyện đầu tiên trong cộng đồng đọc truyện.',
     );
   }
+
+  bool _shouldShowTimeline(
+    CommunityMessage? previous,
+    CommunityMessage current,
+  ) {
+    final currentDate = _parseMessageTime(current.createdAt);
+    if (currentDate == null) return previous == null;
+    final previousDate = previous == null
+        ? null
+        : _parseMessageTime(previous.createdAt);
+    if (previousDate == null) return true;
+    return currentDate.year != previousDate.year ||
+        currentDate.month != previousDate.month ||
+        currentDate.day != previousDate.day;
+  }
+
+  DateTime? _parseMessageTime(String value) {
+    if (value.trim().isEmpty) return null;
+    return DateTime.tryParse(value)?.toLocal();
+  }
+
+  String _formatTimelineDate(String value) {
+    final date = _parseMessageTime(value);
+    if (date == null) return 'Hôm nay';
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = DateTime(date.year, date.month, date.day);
+    final diff = today.difference(target).inDays;
+    if (diff == 0) return 'Hôm nay';
+    if (diff == 1) return 'Hôm qua';
+    return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
+  }
 }
 
 class _MessageBubble extends StatelessWidget {
@@ -296,12 +531,16 @@ class _MessageBubble extends StatelessWidget {
   final bool isMine;
   final bool isDark;
   final Color mineColor;
+  final bool canModerate;
+  final VoidCallback? onDelete;
 
   const _MessageBubble({
     required this.message,
     required this.isMine,
     required this.isDark,
     required this.mineColor,
+    required this.canModerate,
+    required this.onDelete,
   });
 
   @override
@@ -312,6 +551,7 @@ class _MessageBubble extends StatelessWidget {
     final textColor = isMine
         ? Colors.white
         : (isDark ? Colors.white : Colors.black87);
+    final timeLabel = _formatMessageTime(message.createdAt);
 
     return Align(
       alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
@@ -326,24 +566,216 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!isMine)
+            if (!isMine || canModerate)
               Padding(
                 padding: const EdgeInsets.only(bottom: 3),
-                child: Text(
-                  message.displayName,
-                  style: TextStyle(
-                    color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!isMine)
+                      Flexible(
+                        child: Text(
+                          message.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: isDark
+                                ? Colors.grey.shade400
+                                : Colors.grey.shade600,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    if (canModerate) ...[
+                      if (!isMine) const SizedBox(width: 6),
+                      InkWell(
+                        onTap: onDelete,
+                        borderRadius: BorderRadius.circular(999),
+                        child: Padding(
+                          padding: const EdgeInsets.all(3),
+                          child: Icon(
+                            Icons.delete_outline_rounded,
+                            size: 15,
+                            color: isMine
+                                ? Colors.white.withValues(alpha: 0.82)
+                                : Colors.red.withValues(alpha: 0.82),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
-            Text(
-              message.text,
-              style: TextStyle(color: textColor, fontSize: 14, height: 1.35),
-            ),
+            if (message.attachmentPath.isNotEmpty) ...[
+              _MessageAttachment(
+                path: message.attachmentPath,
+                type: message.attachmentType,
+                isMine: isMine,
+              ),
+              if (message.text.isNotEmpty) const SizedBox(height: 6),
+            ],
+            if (message.text.isNotEmpty)
+              Text(
+                message.text,
+                style: TextStyle(color: textColor, fontSize: 14, height: 1.35),
+              ),
+            if (timeLabel.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                timeLabel,
+                style: TextStyle(
+                  color: textColor.withValues(alpha: 0.68),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
           ],
         ),
+      ),
+    );
+  }
+
+  String _formatMessageTime(String value) {
+    final date = DateTime.tryParse(value)?.toLocal();
+    if (date == null) return '';
+    return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+  }
+}
+
+class _TimelineSeparator extends StatelessWidget {
+  final String label;
+  final bool isDark;
+
+  const _TimelineSeparator({required this.label, required this.isDark});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF242426) : Colors.grey.shade200,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: isDark ? Colors.grey.shade300 : Colors.grey.shade700,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AttachmentPreview extends StatelessWidget {
+  final String path;
+  final String type;
+  final VoidCallback onRemove;
+
+  const _AttachmentPreview({
+    required this.path,
+    required this.type,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fileName = path.split(RegExp(r'[\\/]')).last;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(type == 'video' ? Icons.videocam_outlined : Icons.image),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              fileName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+          IconButton(
+            onPressed: onRemove,
+            icon: const Icon(Icons.close, size: 18),
+            tooltip: 'Bỏ tệp',
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MessageAttachment extends StatelessWidget {
+  final String path;
+  final String type;
+  final bool isMine;
+
+  const _MessageAttachment({
+    required this.path,
+    required this.type,
+    required this.isMine,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (type == 'image') {
+      final file = File(path);
+      if (file.existsSync()) {
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.file(file, width: 220, height: 150, fit: BoxFit.cover),
+        );
+      }
+    }
+
+    final fileName = path.split(RegExp(r'[\\/]')).last;
+    return Container(
+      width: 220,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: isMine ? 0.18 : 0.08),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            type == 'video'
+                ? Icons.play_circle_outline
+                : Icons.insert_drive_file,
+            color: isMine
+                ? Colors.white
+                : Theme.of(context).colorScheme.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              fileName,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: isMine
+                    ? Colors.white
+                    : Theme.of(context).colorScheme.onSurface,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

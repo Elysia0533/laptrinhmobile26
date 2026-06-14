@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/story.dart';
@@ -18,13 +20,14 @@ class _ExploreScreenState extends State<ExploreScreen> {
   List<Story> _serverStories = [];
   bool _isLoading = true;
   bool _isSearching = false;
+  bool _isEnrichingMetadata = false;
   String? _loadError;
 
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
 
-  String _selectedGenre = 'Tất cả';
   List<String> _allGenres = ['Tất cả'];
+  final Set<String> _selectedGenres = {};
 
   @override
   void initState() {
@@ -49,10 +52,13 @@ class _ExploreScreenState extends State<ExploreScreen> {
     } catch (e) {
       _serverStories = [];
       _allGenres = ['Tất cả'];
-      _selectedGenre = 'Tất cả';
+      _selectedGenres.clear();
       _loadError = _formatLoadError(e);
     }
-    if (mounted) setState(() => _isLoading = false);
+    if (mounted) {
+      setState(() => _isLoading = false);
+      unawaited(_enrichMissingDriveMetadata());
+    }
   }
 
   Future<void> _refreshServerStories() async {
@@ -77,7 +83,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
       }
       _loadError = _formatLoadError(e);
     }
-    if (mounted) setState(() => _isLoading = false);
+    if (mounted) {
+      setState(() => _isLoading = false);
+      unawaited(_enrichMissingDriveMetadata());
+    }
   }
 
   String _formatLoadError(Object error) {
@@ -101,30 +110,112 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
     final sorted = genreSet.toList()..sort();
     _allGenres = ['Tất cả', ...sorted];
-
-    if (!_allGenres.contains(_selectedGenre)) {
-      _selectedGenre = 'Tất cả';
-    }
+    _selectedGenres.removeWhere((genre) => !genreSet.contains(genre));
   }
 
   List<Story> get _displayStories {
+    final selectedKeys = _selectedGenres.map(_genreKey).toSet();
     return _serverStories.where((s) {
+      final storyGenreKeys = s.genres.map(_genreKey).toSet();
       final genreMatch =
-          _selectedGenre == 'Tất cả' ||
-          s.genres.any((g) => g.trim() == _selectedGenre);
+          selectedKeys.isEmpty ||
+          storyGenreKeys.any((genre) => selectedKeys.contains(genre));
 
       final q = _searchQuery.trim().toLowerCase();
-      final textMatch =
-          q.isEmpty ||
-          s.title.toLowerCase().contains(q) ||
-          s.author.toLowerCase().contains(q);
+      final searchText = [
+        s.title,
+        s.author,
+        s.description,
+        s.fileType,
+        ...s.genres,
+      ].join(' ').toLowerCase();
+      final textMatch = q.isEmpty || searchText.contains(q);
 
       return genreMatch && textMatch;
     }).toList();
   }
 
+  String _genreKey(String value) => value.trim().toLowerCase();
+
+  void _toggleGenre(String genre) {
+    if (genre == _allGenres.first) {
+      setState(_selectedGenres.clear);
+      return;
+    }
+
+    setState(() {
+      if (_selectedGenres.contains(genre)) {
+        _selectedGenres.remove(genre);
+      } else {
+        _selectedGenres.add(genre);
+      }
+    });
+  }
+
+  Future<void> _enrichMissingDriveMetadata({bool force = false}) async {
+    if (_isEnrichingMetadata || _serverStories.isEmpty) return;
+    final targets = _serverStories
+        .where(
+          (story) =>
+              story.isFromDrive &&
+              story.driveFileId.trim().isNotEmpty &&
+              story.fileType.trim().toLowerCase() == 'epub' &&
+              (force ||
+                  story.genres.isEmpty ||
+                  story.description.trim().isEmpty ||
+                  story.author.trim().isEmpty ||
+                  story.totalChapters <= 1 ||
+                  story.iconUrl.trim().isEmpty ||
+                  story.iconUrl.trim().startsWith('assets/')),
+        )
+        .take(12)
+        .toList();
+    if (targets.isEmpty) return;
+
+    setState(() => _isEnrichingMetadata = true);
+    var changed = false;
+    try {
+      for (final story in targets) {
+        final enriched = await ApiService.enrichDriveStoryMetadata(
+          story,
+          force: force,
+        );
+        if (!mounted) return;
+        final index = _serverStories.indexWhere(
+          (item) =>
+              item.id == enriched.id ||
+              (item.driveFileId.isNotEmpty &&
+                  item.driveFileId == enriched.driveFileId),
+        );
+        if (index == -1) continue;
+        if (_storyMetadataChanged(_serverStories[index], enriched)) {
+          _serverStories[index] = enriched;
+          changed = true;
+        }
+      }
+    } finally {
+      if (mounted) {
+        if (changed) _buildGenreList();
+        setState(() => _isEnrichingMetadata = false);
+      }
+    }
+  }
+
+  bool _storyMetadataChanged(Story before, Story after) {
+    return before.iconUrl != after.iconUrl ||
+        before.description != after.description ||
+        before.author != after.author ||
+        before.totalChapters != after.totalChapters ||
+        before.genres.join('|') != after.genres.join('|');
+  }
+
   void _importFromDriveDialog() {
     TextEditingController urlController = TextEditingController();
+    ApiService.getSavedDriveStoryFolderInputs().then((inputs) {
+      if (urlController.text.isEmpty && inputs.isNotEmpty) {
+        urlController.text = inputs.join('\n');
+      }
+    });
     showDialog(
       context: context,
       builder: (dialogContext) {
@@ -136,7 +227,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
             maxLines: 6,
             decoration: const InputDecoration(
               hintText:
-                  'Dán một hoặc nhiều link Drive, mỗi link một dòng hoặc cách nhau bằng dấu phẩy',
+                  'Dán link Drive. Link admin nhập sẽ được lưu để lần sau tự cập nhật.',
             ),
           ),
           actions: [
@@ -176,7 +267,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
                     ).showSnackBar(SnackBar(content: Text('Lỗi: $e')));
                   }
                 }
-                if (mounted) setState(() => _isLoading = false);
+                if (mounted) {
+                  setState(() => _isLoading = false);
+                  unawaited(_enrichMissingDriveMetadata());
+                }
               },
             ),
           ],
@@ -201,7 +295,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 controller: _searchController,
                 autofocus: true,
                 decoration: InputDecoration(
-                  hintText: 'Tên truyện hoặc tác giả...',
+                  hintText: 'Tên, tác giả hoặc tag...',
                   border: InputBorder.none,
                   hintStyle: TextStyle(color: colorScheme.onSurfaceVariant),
                 ),
@@ -296,10 +390,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 if (_allGenres.length > 1)
                   _GenreChipBar(
                     genres: _allGenres,
-                    selected: _selectedGenre,
+                    selectedGenres: _selectedGenres,
                     accentColor: accentColor,
                     isDark: isDark,
-                    onSelect: (genre) => setState(() => _selectedGenre = genre),
+                    onSelect: _toggleGenre,
                   ),
 
                 Padding(
@@ -440,6 +534,29 @@ class _ExploreScreenState extends State<ExploreScreen> {
               ),
             ],
           ),
+          if (_isEnrichingMetadata) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(999),
+              child: LinearProgressIndicator(
+                minHeight: 3,
+                color: accentColor,
+                backgroundColor: accentColor.withValues(alpha: 0.14),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Đang cập nhật tag EPUB...',
+                style: TextStyle(
+                  color: colorScheme.onSurfaceVariant,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -458,7 +575,12 @@ class _ExploreScreenState extends State<ExploreScreen> {
   Widget _buildResultHeader(bool isDark, Color accentColor) {
     final stories = _displayStories;
     final isFiltered =
-        _searchQuery.trim().isNotEmpty || _selectedGenre != 'Tất cả';
+        _searchQuery.trim().isNotEmpty || _selectedGenres.isNotEmpty;
+    final selectedLabel = _selectedGenres.isEmpty
+        ? ''
+        : _selectedGenres.length <= 3
+        ? _selectedGenres.join(', ')
+        : '${_selectedGenres.take(3).join(', ')} +${_selectedGenres.length - 3}';
 
     return Row(
       children: [
@@ -476,7 +598,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
               ),
               const SizedBox(height: 2),
               Text(
-                '${stories.length} truyện${_selectedGenre != 'Tất cả' ? ' · $_selectedGenre' : ''}',
+                '${stories.length} truyện${selectedLabel.isNotEmpty ? ' · $selectedLabel' : ''}',
                 style: TextStyle(
                   fontSize: 12,
                   color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
@@ -491,7 +613,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
               setState(() {
                 _searchQuery = '';
                 _searchController.clear();
-                _selectedGenre = 'Tất cả';
+                _selectedGenres.clear();
                 _isSearching = false;
               });
             },
@@ -538,14 +660,14 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
 class _GenreChipBar extends StatelessWidget {
   final List<String> genres;
-  final String selected;
+  final Set<String> selectedGenres;
   final Color accentColor;
   final bool isDark;
   final ValueChanged<String> onSelect;
 
   const _GenreChipBar({
     required this.genres,
-    required this.selected,
+    required this.selectedGenres,
     required this.accentColor,
     required this.isDark,
     required this.onSelect,
@@ -572,7 +694,9 @@ class _GenreChipBar extends StatelessWidget {
         separatorBuilder: (context, index) => const SizedBox(width: 8),
         itemBuilder: (context, index) {
           final genre = genres[index];
-          final isSelected = genre == selected;
+          final isSelected = index == 0
+              ? selectedGenres.isEmpty
+              : selectedGenres.contains(genre);
           return GestureDetector(
             onTap: () => onSelect(genre),
             child: AnimatedContainer(
@@ -592,7 +716,7 @@ class _GenreChipBar extends StatelessWidget {
                 ),
               ),
               child: Text(
-                genre,
+                index == 0 && selectedGenres.isNotEmpty ? 'Bỏ lọc' : genre,
                 style: TextStyle(
                   color: isSelected
                       ? Colors.white

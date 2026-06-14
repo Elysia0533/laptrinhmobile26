@@ -53,7 +53,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadStories() async {
     setState(() => _isLoading = true);
-    _personalStories = await ApiService.fetchPersonalStories();
+    final stories = await ApiService.fetchPersonalStories();
+    if (!mounted) return;
+    _personalStories = stories;
     _applySearch();
     setState(() => _isLoading = false);
   }
@@ -101,7 +103,7 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (ctx, setModalState) {
-            return Container(
+            return SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -366,6 +368,7 @@ class _HomeScreenState extends State<HomeScreen> {
       context,
       MaterialPageRoute(builder: (_) => StoryDetailScreen(story: story)),
     );
+    if (!mounted) return;
     _loadStories();
   }
 

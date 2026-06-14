@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image/image.dart' as img;
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
+import 'dart:io';
 import '../models/reading_marker.dart';
 import '../models/story.dart';
 import '../services/api_service.dart';
@@ -9,6 +14,7 @@ import '../theme/theme_provider.dart';
 import '../theme/user_provider.dart';
 import 'community_screen.dart';
 import 'explore_screen.dart';
+import 'story_detail_screen.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
@@ -570,10 +576,167 @@ class ProfileScreen extends StatelessWidget {
     ).whenComplete(emailController.dispose);
   }
 
+  ImageProvider? _avatarImageProvider(String path) {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty) return null;
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return NetworkImage(trimmed);
+    }
+    final file = File(trimmed);
+    if (file.existsSync()) return FileImage(file);
+    return null;
+  }
+
+  Future<String?> _pickAndCropAvatar(BuildContext context) async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return null;
+
+    final picked = result.files.single;
+    final bytes = picked.bytes ?? await File(picked.path!).readAsBytes();
+    if (!context.mounted) return null;
+    final croppedBytes = await _showAvatarCropDialog(context, bytes);
+    if (croppedBytes == null) return null;
+
+    final appDir = await getApplicationDocumentsDirectory();
+    final avatarDir = Directory('${appDir.path}/avatars');
+    await avatarDir.create(recursive: true);
+    final file = File(
+      '${avatarDir.path}/avatar_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    );
+    await file.writeAsBytes(croppedBytes, flush: true);
+    return file.path;
+  }
+
+  Future<Uint8List?> _showAvatarCropDialog(
+    BuildContext context,
+    Uint8List bytes,
+  ) async {
+    double zoom = 1;
+    double offsetX = 0;
+    double offsetY = 0;
+    String? errorText;
+
+    return showDialog<Uint8List>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Căn chỉnh avatar'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 220,
+                  height: 220,
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.black,
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.primary,
+                      width: 2,
+                    ),
+                  ),
+                  child: Transform.translate(
+                    offset: Offset(offsetX * 70, offsetY * 70),
+                    child: Transform.scale(
+                      scale: zoom,
+                      child: Image.memory(bytes, fit: BoxFit.cover),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _AvatarSlider(
+                  label: 'Phóng to',
+                  value: zoom,
+                  min: 1,
+                  max: 3,
+                  onChanged: (value) => setDialogState(() => zoom = value),
+                ),
+                _AvatarSlider(
+                  label: 'Ngang',
+                  value: offsetX,
+                  min: -1,
+                  max: 1,
+                  onChanged: (value) => setDialogState(() => offsetX = value),
+                ),
+                _AvatarSlider(
+                  label: 'Dọc',
+                  value: offsetY,
+                  min: -1,
+                  max: 1,
+                  onChanged: (value) => setDialogState(() => offsetY = value),
+                ),
+                if (errorText != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    errorText!,
+                    style: const TextStyle(color: Colors.red, fontSize: 12),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () {
+                try {
+                  final cropped = _cropAvatarBytes(
+                    bytes,
+                    zoom: zoom,
+                    offsetX: offsetX,
+                    offsetY: offsetY,
+                  );
+                  Navigator.pop(ctx, cropped);
+                } catch (_) {
+                  setDialogState(() => errorText = 'Không thể xử lý ảnh này.');
+                }
+              },
+              child: const Text('Dùng ảnh này'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Uint8List _cropAvatarBytes(
+    Uint8List bytes, {
+    required double zoom,
+    required double offsetX,
+    required double offsetY,
+  }) {
+    final source = img.decodeImage(bytes);
+    if (source == null) {
+      throw Exception('Invalid image');
+    }
+
+    final minSide = source.width < source.height ? source.width : source.height;
+    final cropSize = (minSide / zoom).round().clamp(64, minSide);
+    final maxX = source.width - cropSize;
+    final maxY = source.height - cropSize;
+    final centerX = source.width / 2 - cropSize / 2 - offsetX * maxX / 2;
+    final centerY = source.height / 2 - cropSize / 2 - offsetY * maxY / 2;
+    final x = centerX.round().clamp(0, maxX);
+    final y = centerY.round().clamp(0, maxY);
+
+    final cropped = img.copyCrop(source, x, y, cropSize, cropSize);
+    final resized = img.copyResize(cropped, width: 512, height: 512);
+    return Uint8List.fromList(img.encodeJpg(resized, quality: 88));
+  }
+
   void _showEditProfileDialog(BuildContext context) {
     final user = context.read<UserProvider>();
     final nameController = TextEditingController(text: user.name);
     int selectedColor = user.avatarColor.toARGB32();
+    String selectedAvatarUrl = user.avatarUrl;
     bool isSubmitting = false;
     String? errorText;
 
@@ -587,6 +750,42 @@ class ProfileScreen extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Center(
+                  child: Column(
+                    children: [
+                      CircleAvatar(
+                        radius: 44,
+                        backgroundColor: Color(selectedColor),
+                        backgroundImage: _avatarImageProvider(
+                          selectedAvatarUrl,
+                        ),
+                        child: _avatarImageProvider(selectedAvatarUrl) == null
+                            ? Text(
+                                user.initials,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              )
+                            : null,
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: isSubmitting
+                            ? null
+                            : () async {
+                                final path = await _pickAndCropAvatar(context);
+                                if (path == null) return;
+                                setDialogState(() => selectedAvatarUrl = path);
+                              },
+                        icon: const Icon(Icons.photo_camera_outlined),
+                        label: const Text('Chọn ảnh avatar'),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: nameController,
                   decoration: const InputDecoration(
@@ -669,6 +868,7 @@ class ProfileScreen extends StatelessWidget {
                         await context.read<UserProvider>().updateProfile(
                           displayName: name,
                           colorValue: selectedColor,
+                          avatarUrl: selectedAvatarUrl,
                         );
                         if (!ctx.mounted) return;
                         Navigator.pop(ctx);
@@ -720,6 +920,71 @@ class ProfileScreen extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+
+  void _showStorageInfo(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Lưu trữ offline',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 12),
+                _StorageInfoRow(
+                  icon: Icons.file_present_rounded,
+                  title: 'Định dạng hỗ trợ',
+                  value: 'EPUB, PDF, TXT',
+                  color: colorScheme.primary,
+                ),
+                _StorageInfoRow(
+                  icon: Icons.download_done_rounded,
+                  title: 'Truyện đã tải',
+                  value: 'Lưu trong vùng dữ liệu riêng của ứng dụng',
+                  color: const Color(0xFF4E8F7E),
+                ),
+                _StorageInfoRow(
+                  icon: Icons.cached_rounded,
+                  title: 'Cache đọc Drive',
+                  value: 'File và ảnh bìa được cache để mở lại nhanh hơn',
+                  color: const Color(0xFF5A7DB8),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Khi xóa truyện khỏi kệ sách, app chỉ dọn các file thuộc thư mục dữ liệu của vBook.',
+                  style: TextStyle(
+                    color: colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _copyShareInvite(BuildContext context) {
+    Clipboard.setData(
+      const ClipboardData(
+        text:
+            'Mình đang dùng vBook để đọc EPUB/PDF/TXT, tải truyện offline và nghe truyện bằng TTS.',
+      ),
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Đã sao chép lời mời chia sẻ vBook.')),
     );
   }
 
@@ -784,6 +1049,7 @@ class ProfileScreen extends StatelessWidget {
               icon: Icons.bookmark_border_rounded,
               title: 'Lưu trữ',
               subtitle: 'EPUB, PDF, TXT offline',
+              onTap: () => _showStorageInfo(context),
             ),
             _buildSectionHeader('Thống kê kệ sách', sectionBgColor, textColor),
             _buildLibraryStatsPanel(context),
@@ -804,6 +1070,7 @@ class ProfileScreen extends StatelessWidget {
               icon: Icons.share_outlined,
               title: 'Mời bạn bè sử dụng',
               subtitle: 'Chia sẻ vBook',
+              onTap: () => _copyShareInvite(context),
             ),
             const SizedBox(height: 24),
             Center(
@@ -894,119 +1161,193 @@ class ProfileScreen extends StatelessWidget {
         }
 
         final stats = snapshot.data!;
-        return Container(
-          margin: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: isDark ? const Color(0xFF151A18) : colorScheme.surface,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
-              color: colorScheme.outline.withValues(alpha: 0.14),
+        return InkWell(
+          onTap: stats.stories.isEmpty
+              ? null
+              : () => _showLibraryStoriesSheet(context, stats.stories),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF151A18) : colorScheme.surface,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: colorScheme.outline.withValues(alpha: 0.14),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: colorScheme.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Icon(
+                        Icons.auto_stories_rounded,
+                        color: colorScheme.primary,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Kệ sách của bạn',
+                            style: TextStyle(
+                              color: colorScheme.onSurface,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            stats.lastRead == null
+                                ? 'Chưa có lịch sử đọc gần đây'
+                                : 'Đọc gần nhất: ${stats.lastRead!.title}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: colorScheme.onSurfaceVariant,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (stats.stories.isNotEmpty)
+                      Icon(
+                        Icons.chevron_right_rounded,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _LibraryStatChip(
+                        label: 'Tổng',
+                        value: '${stats.total}',
+                        icon: Icons.library_books_rounded,
+                        color: colorScheme.primary,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _LibraryStatChip(
+                        label: 'Đang đọc',
+                        value: '${stats.reading}',
+                        icon: Icons.timeline_rounded,
+                        color: colorScheme.secondary,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _LibraryStatChip(
+                        label: 'Offline',
+                        value: '${stats.offline}',
+                        icon: Icons.download_done_rounded,
+                        color: const Color(0xFF4E8F7E),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _LibraryStatChip(
+                        label: 'Drive',
+                        value: '${stats.drive}',
+                        icon: Icons.cloud_done_rounded,
+                        color: const Color(0xFF5A7DB8),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '${stats.historyCount} mục lịch sử đọc được lưu trên thiết bị',
+                  style: TextStyle(
+                    color: colorScheme.onSurfaceVariant,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
             ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: colorScheme.primary.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Icon(
-                      Icons.auto_stories_rounded,
-                      color: colorScheme.primary,
-                      size: 20,
-                    ),
+        );
+      },
+    );
+  }
+
+  void _showLibraryStoriesSheet(BuildContext context, List<Story> stories) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.68,
+          minChildSize: 0.36,
+          maxChildSize: 0.92,
+          builder: (context, scrollController) {
+            return ListView.separated(
+              controller: scrollController,
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+              itemCount: stories.length + 1,
+              separatorBuilder: (_, index) =>
+                  index == 0 ? const SizedBox(height: 8) : const Divider(),
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return const Text(
+                    'Truyện trong kệ sách',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                  );
+                }
+                final story = stories[index - 1];
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    story.localPath.isNotEmpty
+                        ? Icons.download_done_rounded
+                        : Icons.cloud_queue_rounded,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Kệ sách của bạn',
-                          style: TextStyle(
-                            color: colorScheme.onSurface,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          stats.lastRead == null
-                              ? 'Chưa có lịch sử đọc gần đây'
-                              : 'Đọc gần nhất: ${stats.lastRead!.title}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: colorScheme.onSurfaceVariant,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
+                  title: Text(
+                    story.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: _LibraryStatChip(
-                      label: 'Tổng',
-                      value: '${stats.total}',
-                      icon: Icons.library_books_rounded,
-                      color: colorScheme.primary,
-                    ),
+                  subtitle: Text(
+                    story.author.isNotEmpty
+                        ? story.author
+                        : story.fileType.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _LibraryStatChip(
-                      label: 'Đang đọc',
-                      value: '${stats.reading}',
-                      icon: Icons.timeline_rounded,
-                      color: colorScheme.secondary,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: _LibraryStatChip(
-                      label: 'Offline',
-                      value: '${stats.offline}',
-                      icon: Icons.download_done_rounded,
-                      color: const Color(0xFF4E8F7E),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _LibraryStatChip(
-                      label: 'Drive',
-                      value: '${stats.drive}',
-                      icon: Icons.cloud_done_rounded,
-                      color: const Color(0xFF5A7DB8),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                '${stats.historyCount} mục lịch sử đọc được lưu trên thiết bị',
-                style: TextStyle(
-                  color: colorScheme.onSurfaceVariant,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => StoryDetailScreen(story: story),
+                      ),
+                    );
+                  },
+                );
+              },
+            );
+          },
         );
       },
     );
@@ -1029,14 +1370,17 @@ class ProfileScreen extends StatelessWidget {
             child: CircleAvatar(
               radius: 40,
               backgroundColor: userProvider.avatarColor,
-              child: Text(
-                userProvider.initials,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+              backgroundImage: _avatarImageProvider(userProvider.avatarUrl),
+              child: _avatarImageProvider(userProvider.avatarUrl) == null
+                  ? Text(
+                      userProvider.initials,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )
+                  : null,
             ),
           ),
           const SizedBox(width: 16),
@@ -1046,6 +1390,8 @@ class ProfileScreen extends StatelessWidget {
               children: [
                 Text(
                   userProvider.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
@@ -1227,7 +1573,7 @@ class ProfileScreen extends StatelessWidget {
           context,
           icon: Icons.forum_outlined,
           title: 'Kiểm tra cộng đồng',
-          subtitle: 'Đọc và gửi tin nhắn bằng tài khoản admin',
+          subtitle: 'Đọc, gửi và xóa tin nhắn vi phạm bằng tài khoản admin',
           onTap: () {
             Navigator.of(
               context,
@@ -1270,11 +1616,13 @@ class ProfileScreen extends StatelessWidget {
       subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
       trailing:
           trailing ??
-          Icon(
-            Icons.chevron_right,
-            size: 20,
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+          (onTap == null
+              ? null
+              : Icon(
+                  Icons.chevron_right,
+                  size: 20,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                )),
     );
   }
 
@@ -1488,6 +1836,92 @@ class _LibraryStatChip extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _StorageInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String value;
+  final Color color;
+
+  const _StorageInfoRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: colorScheme.onSurface,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: TextStyle(
+                    color: colorScheme.onSurfaceVariant,
+                    fontSize: 13,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AvatarSlider extends StatelessWidget {
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final ValueChanged<double> onChanged;
+
+  const _AvatarSlider({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+        ),
+        Expanded(
+          child: Slider(value: value, min: min, max: max, onChanged: onChanged),
+        ),
+      ],
     );
   }
 }

@@ -23,7 +23,6 @@ dependencies:
   image: ^3.3.0
   flutter_tts: ^4.2.0
   google_fonts: ^6.2.1
-  flutter_html: ^3.0.0-beta.2
   epubx: ^4.0.0
   firebase_core: ^4.10.0
   firebase_auth: ^6.5.2
@@ -43,4 +42,3 @@ flutter:
   assets:
     - assets/branding/
     - assets/covers/
-    - assets/offline_stories/

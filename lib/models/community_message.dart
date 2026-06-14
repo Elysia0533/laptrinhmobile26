@@ -5,6 +5,8 @@ class CommunityMessage {
   final String avatarUrl;
   final String text;
   final String createdAt;
+  final String attachmentType;
+  final String attachmentPath;
 
   const CommunityMessage({
     required this.id,
@@ -13,6 +15,8 @@ class CommunityMessage {
     required this.text,
     this.avatarUrl = '',
     this.createdAt = '',
+    this.attachmentType = '',
+    this.attachmentPath = '',
   });
 
   factory CommunityMessage.fromJson(Map<String, dynamic> json) {
@@ -28,6 +32,14 @@ class CommunityMessage {
       text: json['text']?.toString() ?? '',
       createdAt:
           json['createdAt']?.toString() ?? json['created_at']?.toString() ?? '',
+      attachmentType:
+          json['attachmentType']?.toString() ??
+          json['attachment_type']?.toString() ??
+          '',
+      attachmentPath:
+          json['attachmentPath']?.toString() ??
+          json['attachment_path']?.toString() ??
+          '',
     );
   }
 
@@ -39,6 +51,8 @@ class CommunityMessage {
       'avatarUrl': avatarUrl,
       'text': text,
       'createdAt': createdAt,
+      'attachmentType': attachmentType,
+      'attachmentPath': attachmentPath,
     };
   }
 }

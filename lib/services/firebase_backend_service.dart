@@ -243,7 +243,11 @@ class FirebaseBackendService {
     return snapshot.docs.reversed.map(_messageFromDoc).toList();
   }
 
-  static Future<CommunityMessage> sendCommunityMessage(String text) async {
+  static Future<CommunityMessage> sendCommunityMessage(
+    String text, {
+    String attachmentType = '',
+    String attachmentPath = '',
+  }) async {
     _ensureReady();
     final user = _auth.currentUser;
     if (user == null) {
@@ -260,15 +264,43 @@ class FirebaseBackendService {
 
     await _refreshVerifiedToken(refreshedUser);
     final appUser = await _appUserFromFirebase(refreshedUser);
-    final ref = await _db.collection('community_messages').add({
+    if (text.trim().isEmpty && attachmentPath.trim().isEmpty) {
+      throw Exception('Tin nhắn hoặc tệp đính kèm không được để trống.');
+    }
+
+    final data = {
       'userId': appUser.id,
       'displayName': appUser.displayName,
       'avatarUrl': appUser.avatarUrl,
-      'text': text,
+      'text': text.trim(),
       'createdAt': FieldValue.serverTimestamp(),
-    });
+    };
+    if (attachmentPath.trim().isNotEmpty) {
+      data['attachmentType'] = attachmentType.trim();
+      data['attachmentPath'] = attachmentPath.trim();
+    }
+
+    final ref = await _db.collection('community_messages').add(data);
     final doc = await ref.get();
     return _messageFromDoc(doc);
+  }
+
+  static Future<void> deleteCommunityMessage(String messageId) async {
+    _ensureReady();
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw Exception('Cần đăng nhập bằng tài khoản admin để xóa tin nhắn.');
+    }
+
+    await user.reload();
+    final refreshedUser = _auth.currentUser ?? user;
+    await _refreshVerifiedToken(refreshedUser);
+    final appUser = await _appUserFromFirebase(refreshedUser);
+    if (appUser.role != 'admin') {
+      throw Exception('Tài khoản hiện tại không có quyền admin.');
+    }
+
+    await _db.collection('community_messages').doc(messageId).delete();
   }
 
   static Future<void> syncStoryToLibrary(Story story) async {
@@ -433,6 +465,8 @@ class FirebaseBackendService {
       'avatarUrl': data['avatarUrl'],
       'text': data['text'],
       'createdAt': _timestampToIso(data['createdAt']),
+      'attachmentType': data['attachmentType'],
+      'attachmentPath': data['attachmentPath'],
     });
   }
 

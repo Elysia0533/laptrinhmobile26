@@ -13,6 +13,7 @@ class UserProvider extends ChangeNotifier {
   String _email = '';
   String _role = 'user';
   String _token = '';
+  String _avatarUrl = '';
   int _avatarColorValue = 0xFF4CAF50;
 
   String get name => _name;
@@ -20,6 +21,7 @@ class UserProvider extends ChangeNotifier {
   String get email => _email;
   String get role => _role;
   String get token => _token;
+  String get avatarUrl => _avatarUrl;
   bool get isLoggedIn => _user != null && _token.isNotEmpty;
   bool get isAdmin => _role == 'admin';
   bool get emailVerified => _user?.emailVerified ?? false;
@@ -37,6 +39,7 @@ class UserProvider extends ChangeNotifier {
     _name = _user?.displayName ?? prefs.getString(_nameKey) ?? '';
     _email = _user?.email ?? '';
     _role = _user?.role ?? 'user';
+    _avatarUrl = _user?.avatarUrl ?? '';
     _avatarColorValue = prefs.getInt(_avatarColorKey) ?? 0xFF4CAF50;
     notifyListeners();
 
@@ -91,6 +94,7 @@ class UserProvider extends ChangeNotifier {
     _name = user.displayName;
     _email = user.email;
     _role = user.role;
+    _avatarUrl = user.avatarUrl;
     _avatarColorValue = colorValue;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_nameKey, _name);
@@ -121,6 +125,7 @@ class UserProvider extends ChangeNotifier {
     _name = user.displayName;
     _email = user.email;
     _role = user.role;
+    _avatarUrl = user.avatarUrl;
     _avatarColorValue = colorValue;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_nameKey, _name);
@@ -139,6 +144,7 @@ class UserProvider extends ChangeNotifier {
     _name = refreshedUser.displayName;
     _email = refreshedUser.email;
     _role = refreshedUser.role;
+    _avatarUrl = refreshedUser.avatarUrl;
 
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_nameKey, _name);
@@ -154,6 +160,7 @@ class UserProvider extends ChangeNotifier {
     _email = '';
     _role = 'user';
     _token = '';
+    _avatarUrl = '';
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_nameKey);
     await prefs.remove(_avatarColorKey);
