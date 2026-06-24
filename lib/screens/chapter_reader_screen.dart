@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:epubx/epubx.dart' as epubx;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
 import '../models/story.dart';
 import '../models/reading_marker.dart';
 import '../services/api_service.dart';
+import '../services/google_drive_service.dart';
 import '../theme/reading_settings_provider.dart';
 import '../widgets/reader_selectable_text.dart';
 
@@ -165,7 +167,8 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
   Future<void> _loadEpub() async {
     setState(() => _isLoading = true);
     try {
-      final bytes = await File(widget.story.localPath).readAsBytes();
+      final epubFile = await _resolveEpubFile();
+      final bytes = await epubFile.readAsBytes();
       final book = await epubx.EpubReader.readBook(bytes);
       final flat = <_Chapter>[];
       _flattenChapters(book.Chapters ?? [], flat);
@@ -196,6 +199,36 @@ class _ChapterReaderScreenState extends State<ChapterReaderScreen> {
         _isLoading = false;
       });
     }
+  }
+
+  /// Trả về file EPUB để đọc.
+  /// Nếu localPath tồn tại → dùng trực tiếp.
+  /// Nếu file bị mất nhưng có driveFileId → tải lại từ Drive vào cache.
+  Future<File> _resolveEpubFile() async {
+    final localPath = widget.story.localPath;
+    if (localPath.isNotEmpty) {
+      final localFile = File(localPath);
+      if (await localFile.exists()) return localFile;
+    }
+    // Fallback: tải từ Drive
+    if (widget.story.isFromDrive && widget.story.driveFileId.isNotEmpty) {
+      final directory = await getApplicationDocumentsDirectory();
+      final cacheDir = Directory('${directory.path}/drive_read_cache');
+      await cacheDir.create(recursive: true);
+      final safeId = widget.story.driveFileId.replaceAll(
+        RegExp(r'[^A-Za-z0-9_-]'),
+        '_',
+      );
+      final cachedFile = File('${cacheDir.path}/$safeId.epub');
+      if (await cachedFile.exists() && await cachedFile.length() > 0) {
+        return cachedFile;
+      }
+      return GoogleDriveService.downloadFileToFile(
+        widget.story.driveFileId,
+        cachedFile,
+      );
+    }
+    throw Exception('Không tìm thấy file EPUB. Vui lòng tải lại truyện.');
   }
 
   void _flattenChapters(List<epubx.EpubChapter> list, List<_Chapter> out) {

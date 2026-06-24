@@ -472,7 +472,9 @@ class FirebaseBackendService {
 
   static String _timestampToIso(dynamic value) {
     if (value is Timestamp) return value.toDate().toIso8601String();
-    return value?.toString() ?? '';
+    final text = value?.toString() ?? '';
+    if (text.trim().isNotEmpty) return text;
+    return DateTime.now().toIso8601String();
   }
 
   static int _readInt(dynamic value, [int fallback = 0]) {
